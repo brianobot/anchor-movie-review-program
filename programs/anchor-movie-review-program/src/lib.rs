@@ -1,7 +1,8 @@
 use anchor_lang::prelude::*;
+use anchor_spl::associated_token::AssociatedToken;
+use anchor_spl::token::{mint_to, MintTo, Mint, Token, TokenAccount};
 
 mod constants;
-
 use constants::*;
 
 declare_id!("8zLkkwXZ6wjdBHKqwzYHjjZu8VLnpcRSyxfZKV6wJhUA");
@@ -16,51 +17,17 @@ pub mod anchor_movie_review_program {
         description: String,
         rating: u8,
     ) -> Result<()> {
-        // We require that the rating is between 1 and 5
-        require!(rating >= MIN_RATING && rating <= MAX_RATING, MovieReviewError::InvalidRating);
-
-        // We require that the title is not longer than 20 characters
-        require!(title.len() <= MAX_TITLE_LENGTH, MovieReviewError::TitleTooLong);
-
-        // We require that the description is not longer than 50 characters
-        require!(description.len() <= MAX_DESCRIPTION_LENGTH, MovieReviewError::DescriptionTooLong);
-
-        msg!("Movie review account created");
-        msg!("Title: {}", title);
-        msg!("Description: {}", description);
-        msg!("Rating: {}", rating);
-
-        let movie_review = &mut ctx.accounts.movie_review;
-        movie_review.reviewer = ctx.accounts.initializer.key();
-        movie_review.title = title;
-        movie_review.description = description;
-        movie_review.rating = rating;
+        ctx.accounts.add_review(title, description, rating, &ctx.bumps)?;
         Ok(())
     }
 
     pub fn update_movie_review(
         ctx: Context<UpdateMovieReview>,
-        title: String,
+        _title: String,
         description: String,
         rating: u8,
     ) -> Result<()> {
-        // We require that the rating is between 1 and 5
-        require!(rating >= MIN_RATING && rating <= MAX_RATING, MovieReviewError::InvalidRating);
-
-        // We require that the title is not longer than 20 characters
-        require!(title.len() <= MAX_TITLE_LENGTH, MovieReviewError::TitleTooLong);
-
-        // We require that the description is not longer than 50 characters
-        require!(description.len() <= MAX_DESCRIPTION_LENGTH, MovieReviewError::DescriptionTooLong);
-
-        msg!("Movie review account space reallocated");
-        msg!("Title: {}", title);
-        msg!("Description: {}", description);
-        msg!("Rating: {}", rating);
-
-        let movie_review = &mut ctx.accounts.movie_review;
-        movie_review.description = description;
-        movie_review.rating = rating;
+        ctx.accounts.update_movie_review(description, rating)?;
 
         Ok(())
     }
@@ -69,6 +36,12 @@ pub mod anchor_movie_review_program {
         msg!("Movie review for {} deleted", title);
         Ok(())
     }
+
+    pub fn initialize_token_mint(ctx: Context<InitializeMint>) -> Result<()> {
+        ctx.accounts.init()?;
+        Ok(())
+    }
+
 }
 
 #[derive(Accounts)]
@@ -85,6 +58,60 @@ pub struct AddMovieReview<'info> {
     #[account(mut)]
     pub initializer: Signer<'info>,
     pub system_program: Program<'info, System>,
+    pub token_program: Program<'info, Token>,
+    #[account(
+        mut,
+        seeds = [b"mint"],
+        bump,
+    )]
+    pub mint: Account<'info, Mint>,
+    #[account(
+        init_if_needed,
+        payer = initializer,
+        associated_token::mint = mint,
+        associated_token::authority = initializer,
+    )]
+    pub token_account: Account<'info, TokenAccount>,
+    pub associated_token_program: Program<'info, AssociatedToken>,
+}
+
+impl<'info> AddMovieReview<'info> {
+    pub fn add_review(&mut self, title: String, description: String, rating: u8, bumps: &AddMovieReviewBumps) -> Result<()> {
+        // check title length is valid
+        require!(title.len() <= MAX_TITLE_LENGTH, MovieReviewError::TitleTooLong);
+
+        // check decsription length is valid
+        require!(description.len() <= MAX_DESCRIPTION_LENGTH, MovieReviewError::DescriptionTooLong);
+
+        // check rating is valid
+        require!(rating > MIN_RATING && rating <= MAX_RATING, MovieReviewError::InvalidRating);
+
+        // initialize the movie account state account
+        self.movie_review.set_inner( MovieAccountState {
+            reviewer: *self.initializer.key,
+            rating,
+            title,
+            description,
+        });
+
+        let cpi_program = self.token_program.to_account_info();
+
+        let cpi_accounts = MintTo {
+            mint: self.mint.to_account_info(),
+            to: self.token_account.to_account_info(),
+            authority: self.initializer.to_account_info(),
+        };
+
+        let seeds = ["mint".as_bytes(), &[bumps.mint]];
+
+        let signer_seeds = &[&seeds[..]];
+
+        let cpi_ctx = CpiContext::new_with_signer(cpi_program, cpi_accounts, signer_seeds);
+
+        mint_to(cpi_ctx, 10 * 10u64.pow(6))?;
+
+        Ok(())
+    }
 }
 
 #[derive(Accounts)]
@@ -101,6 +128,22 @@ pub struct UpdateMovieReview<'info> {
     pub system_program: Program<'info, System>,
 }
 
+impl<'info> UpdateMovieReview<'info> {
+    pub fn update_movie_review(&mut self, description: String, rating: u8) -> Result<()> {
+        // check decsription length is valid
+        require!(description.len() <= MAX_DESCRIPTION_LENGTH, MovieReviewError::DescriptionTooLong);
+
+        // check rating is valid
+        require!(rating > MIN_RATING && rating <= MAX_RATING, MovieReviewError::InvalidRating);
+
+        self.movie_review.description = description;
+        self.movie_review.rating = rating;
+
+        Ok(())
+    }
+}
+
+
 #[derive(Accounts)]
 #[instruction(title: String)]
 pub struct DeleteMovieReview<'info> {
@@ -113,6 +156,32 @@ pub struct DeleteMovieReview<'info> {
     pub movie_review: Account<'info, MovieAccountState>,
     #[account(mut)]
     pub initializer: Signer<'info>,
+}
+
+
+#[derive(Accounts)]
+pub struct InitializeMint<'info> {
+    #[account(
+        init,
+        payer = user,
+        seeds = [b"mint"],
+        bump,
+        mint::decimals = 6,
+        mint::authority = user,
+    )]
+    pub mint: Account<'info, Mint>,
+    #[account(mut)]
+    pub user: Signer<'info>,
+    pub token_program: Program<'info, Token>,
+    pub rent: Sysvar<'info, Rent>,
+    pub system_program: Program<'info, System>,
+}
+
+impl<'info> InitializeMint<'info> {
+    pub fn init(&mut self) -> Result<()> {
+        msg!("Token Mint Initialized");
+        Ok(())
+    }
 }
 
 /*

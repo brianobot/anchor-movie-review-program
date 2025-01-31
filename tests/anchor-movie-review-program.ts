@@ -20,6 +20,15 @@ describe("Anchor Movie Review Program", () => {
     program.programId
   );
 
+  const [mint] = anchor.web3.PublicKey.findProgramAddressSync(
+    [Buffer.from("mint")],
+    program.programId
+  )
+
+  it("Initializes the reward token", async () => {
+    const tx = await program.methods.initializeTokenMint().rpc();
+  });
+
   it("adds a movie review", async () => {
     try {
       await program.methods
